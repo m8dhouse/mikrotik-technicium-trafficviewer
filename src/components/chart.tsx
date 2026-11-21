@@ -1,4 +1,4 @@
-import type { HistoryPoint } from "@/lib/types";
+import type { HistoryPoint, LinkInfo } from "@/lib/types";
 import { formatRate } from "./format";
 
 export function Chart({ points, height = 120 }: { points: HistoryPoint[]; height?: number }) {
@@ -41,6 +41,30 @@ export function Stat({ label, value, className = "" }: { label: string; value: s
       <div className="text-xs text-zinc-500">{label}</div>
       <div className={`font-mono text-lg ${className}`}>{value}</div>
     </div>
+  );
+}
+
+const LINK_STYLE: Record<LinkInfo["kind"], { icon: string; label: string; className: string }> = {
+  wifi: { icon: "📶", label: "Wi-Fi", className: "bg-violet-100 text-violet-800 dark:bg-violet-950 dark:text-violet-300" },
+  wired: { icon: "🔌", label: "Wired", className: "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300" },
+  switch: { icon: "🔀", label: "Via switch", className: "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300" },
+  unknown: { icon: "❔", label: "Unknown link", className: "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400" },
+};
+
+export function LinkBadge({ link, detailed = false }: { link: LinkInfo; detailed?: boolean }) {
+  const style = LINK_STYLE[link.kind];
+  const where = [link.port, detailed ? link.via : ""].filter(Boolean).join(" → ");
+  const title = [`${style.label}: ${link.reason}`, link.via ? `Neighbour: ${link.via}` : "", link.privateMac ? "Uses a private (randomised) MAC address" : ""]
+    .filter(Boolean)
+    .join("\n");
+
+  return (
+    <span title={title} className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs whitespace-nowrap ${style.className}`}>
+      <span>{style.icon}</span>
+      <span>{style.label}</span>
+      {where && <span className="opacity-75">· {where}</span>}
+      {detailed && link.privateMac && <span className="opacity-75">· private MAC</span>}
+    </span>
   );
 }
 

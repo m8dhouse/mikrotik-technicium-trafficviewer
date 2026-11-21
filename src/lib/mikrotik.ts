@@ -3,6 +3,8 @@ import type { Config } from "./env";
 import { getJson, type Result } from "./http";
 
 export type Lease = {
+  id: string;
+  dynamic: boolean;
   address: string;
   macAddress: string;
   hostName: string;
@@ -37,13 +39,55 @@ export async function routerCommand<T = unknown>(config: Config, path: string, b
   return getJson<T>(`${config.mikrotikUrl}/rest${path}`, { method: "POST", body, headers: auth(config), timeoutMs: 8000 });
 }
 
-export async function getLeases(config: Config): Promise<Result<Lease[]>> {
-  const result = await rest(config, "/ip/dhcp-server/lease", ["address", "active-address", "mac-address", "host-name", "comment"]);
+export type Neighbor = { interface: string; identity: string; platform: string; board: string };
+
+export async function getBridgeHosts(config: Config): Promise<Result<Map<string, string>>> {
+  const result = await rest(config, "/interface/bridge/host", ["mac-address", "on-interface", "local"]);
+  if (!result.success) return result;
+
+  const ports = new Map<string, string>();
+  for (const row of result.data) {
+    if (row.local === "true" || !row["mac-address"] || !row["on-interface"]) continue;
+    ports.set(row["mac-address"].toUpperCase(), row["on-interface"]);
+  }
+  return { success: true, data: ports };
+}
+
+export async function getNeighbors(config: Config): Promise<Result<Neighbor[]>> {
+  const result = await rest(config, "/ip/neighbor", ["interface", "identity", "platform", "board"]);
   if (!result.success) return result;
 
   return {
     success: true,
     data: result.data.map((row) => ({
+      interface: (row.interface ?? "").split(",")[0],
+      identity: row.identity ?? "",
+      platform: row.platform ?? "",
+      board: row.board ?? "",
+    })),
+  };
+}
+
+export async function getArp(config: Config): Promise<Result<Map<string, string>>> {
+  const result = await rest(config, "/ip/arp", ["address", "mac-address"]);
+  if (!result.success) return result;
+
+  const macs = new Map<string, string>();
+  for (const row of result.data) {
+    if (row.address && row["mac-address"]) macs.set(row.address, row["mac-address"].toUpperCase());
+  }
+  return { success: true, data: macs };
+}
+
+export async function getLeases(config: Config): Promise<Result<Lease[]>> {
+  const result = await rest(config, "/ip/dhcp-server/lease", [".id", "dynamic", "address", "active-address", "mac-address", "host-name", "comment"]);
+  if (!result.success) return result;
+
+  return {
+    success: true,
+    data: result.data.map((row) => ({
+      id: row[".id"] ?? "",
+      dynamic: row.dynamic === "true",
       address: row["active-address"] || row.address || "",
       macAddress: row["mac-address"] ?? "",
       hostName: row["host-name"] ?? "",

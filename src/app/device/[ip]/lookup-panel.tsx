@@ -54,6 +54,12 @@ export function LookupPanel({ ip, onClose }: { ip: string; onClose: () => void }
             <div>
               <dt className="text-xs text-zinc-500 uppercase">Location</dt>
               <dd>{geo?.country ? `${flag(geo.countryCode)} ${[geo.city, geo.region, geo.country].filter(Boolean).join(", ")}` : "Unknown"}</dd>
+              {geo && (
+                <dd className="text-xs text-zinc-500">
+                  Source: {geo.source}
+                  {geo.cloudRegion && <span className="ml-1 rounded bg-zinc-100 px-1 font-mono dark:bg-zinc-800">{geo.cloudRegion}</span>}
+                </dd>
+              )}
               {geo?.latitude != null && geo.longitude != null && (
                 <a
                   className="text-xs text-sky-600 hover:underline dark:text-sky-400"

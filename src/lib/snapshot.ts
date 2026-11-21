@@ -1,7 +1,9 @@
 import "server-only";
 import { getConfig } from "./env";
 import { geoReady, lookupGeo } from "./geo";
-import { getConnections, getLeases, type Connection, type Lease } from "./mikrotik";
+import { describeLink } from "./link";
+import { getNameList } from "./naming";
+import { getArp, getBridgeHosts, getConnections, getLeases, getNeighbors, type Connection, type Lease, type Neighbor } from "./mikrotik";
 import { labelFor } from "./protocols";
 import { getDomainLookup, type DomainLookup } from "./technitium";
 import type { DeviceView, FlowView, HistoryPoint, Snapshot, SnapshotResponse, SourceStatus } from "./types";
@@ -9,12 +11,18 @@ import type { DeviceView, FlowView, HistoryPoint, Snapshot, SnapshotResponse, So
 const CACHE_MS = 2000;
 const DNS_REFRESH_MS = 15000;
 const HISTORY_MS = 15 * 60 * 1000;
+const MAX_LOGGED_FLOWS = 3000;
+const TOPOLOGY_REFRESH_MS = 30000;
+
+type Topology = { ports: Map<string, string>; arp: Map<string, string>; neighbors: Neighbor[]; names: Map<string, string>; fetchedAt: number };
 
 type State = {
   counters: Map<string, { up: number; down: number }>;
   lastPoll: number;
   history: HistoryPoint[];
   deviceHistory: Map<string, HistoryPoint[]>;
+  flowLog: Map<string, Map<string, FlowView>>;
+  topology: Topology;
   leases: Lease[];
   dns: { lookup: DomainLookup | null; fetchedAt: number; status: SourceStatus };
   cached: SnapshotResponse | null;
@@ -27,13 +35,78 @@ const state: State = (globalState.__trafficState ??= {
   lastPoll: 0,
   history: [],
   deviceHistory: new Map(),
+  flowLog: new Map(),
+  topology: { ports: new Map(), arp: new Map(), neighbors: [], names: new Map(), fetchedAt: 0 },
   leases: [],
   dns: { lookup: null, fetchedAt: 0, status: { ok: false, error: "Not loaded yet" } },
   cached: null,
   inFlight: null,
 });
 state.deviceHistory ??= new Map();
+state.flowLog ??= new Map();
+state.topology ??= { ports: new Map(), arp: new Map(), neighbors: [], names: new Map(), fetchedAt: 0 };
+state.topology.names ??= new Map();
 state.leases ??= [];
+
+async function refreshTopology(): Promise<void> {
+  if (Date.now() - state.topology.fetchedAt < TOPOLOGY_REFRESH_MS) return;
+  const config = getConfig();
+  if (!config.success) return;
+
+  const [ports, arp, neighbors, names] = await Promise.all([
+    getBridgeHosts(config.config),
+    getArp(config.config),
+    getNeighbors(config.config),
+    getNameList(config.config),
+  ]);
+  state.topology = {
+    ports: ports.success ? ports.data : state.topology.ports,
+    arp: arp.success ? arp.data : state.topology.arp,
+    neighbors: neighbors.success ? neighbors.data : state.topology.neighbors,
+    names: names.success ? names.data : state.topology.names,
+    fetchedAt: Date.now(),
+  };
+}
+
+export function refreshNamesSoon() {
+  state.topology.fetchedAt = 0;
+  state.cached = null;
+}
+
+function linkFor(mac: string) {
+  const port = mac ? state.topology.ports.get(mac.toUpperCase()) : undefined;
+  let hostsOnPort = 0;
+  if (port) for (const value of state.topology.ports.values()) if (value === port) hostsOnPort++;
+  return describeLink(mac, port, state.topology.neighbors, hostsOnPort);
+}
+
+function logFlows(ip: string, flows: FlowView[], now: number) {
+  const log = state.flowLog.get(ip) ?? new Map<string, FlowView>();
+  const openKeys = new Set<string>();
+
+  for (const flow of flows) {
+    const key = `${flow.id}|${flow.dstAddress}|${flow.dstPort}`;
+    openKeys.add(key);
+    const previous = log.get(key);
+    log.set(key, {
+      ...flow,
+      firstSeen: previous?.firstSeen ?? flow.firstSeen,
+      lastActive: flow.rateUp + flow.rateDown > 0 ? now : (previous?.lastActive ?? flow.lastActive),
+    });
+  }
+
+  for (const [key, flow] of log) {
+    if (openKeys.has(key) || !flow.open) continue;
+    log.set(key, { ...flow, open: false, rateUp: 0, rateDown: 0, state: "closed" });
+  }
+
+  while (log.size > MAX_LOGGED_FLOWS) {
+    const oldestClosed = [...log.entries()].filter(([, flow]) => !flow.open).sort((a, b) => a[1].lastSeen - b[1].lastSeen)[0];
+    if (!oldestClosed) break;
+    log.delete(oldestClosed[0]);
+  }
+  state.flowLog.set(ip, log);
+}
 
 export function isPrivate(ip: string): boolean {
   const [a, b] = ip.split(".").map(Number);
@@ -65,7 +138,7 @@ async function refreshDns(): Promise<void> {
 }
 
 function deviceName(ip: string, lease: Lease | undefined, dns: DomainLookup | null): string {
-  return lease?.comment || lease?.hostName || dns?.hostNames.get(ip) || ip;
+  return lease?.comment || state.topology.names.get(ip) || lease?.hostName || dns?.hostNames.get(ip) || ip;
 }
 
 function domainFor(connection: Connection, dns: DomainLookup | null): string {
@@ -74,11 +147,13 @@ function domainFor(connection: Connection, dns: DomainLookup | null): string {
 }
 
 function emptyDevice(ip: string, lease: Lease | undefined, dns: DomainLookup | null): DeviceView {
+  const mac = (lease?.macAddress || state.topology.arp.get(ip) || "").toUpperCase();
   return {
     ip,
     name: deviceName(ip, lease, dns),
-    mac: lease?.macAddress ?? "",
+    mac,
     hostName: lease?.hostName ?? "",
+    link: linkFor(mac),
     rateUp: 0,
     rateDown: 0,
     bytesUp: 0,
@@ -102,6 +177,7 @@ async function build(): Promise<SnapshotResponse> {
     getLeases(config.config),
     refreshDns(),
     geoReady(),
+    refreshTopology(),
   ]);
 
   if (!connections.success) return { success: false, error: `MikroTik: ${connections.error}` };
@@ -144,6 +220,10 @@ async function build(): Promise<SnapshotResponse> {
       country: location?.country ?? "",
       city: location?.city ?? "",
       org: location?.org ?? "",
+      open: true,
+      firstSeen: now,
+      lastSeen: now,
+      lastActive: rateUp + rateDown > 0 ? now : 0,
     };
 
     const ip = connection.srcAddress;
@@ -164,6 +244,11 @@ async function build(): Promise<SnapshotResponse> {
 
   const list = [...devices.values()].sort((a, b) => a.name.localeCompare(b.name, "en", { numeric: true }));
   for (const device of list) device.flows.sort((a, b) => a.id.localeCompare(b.id, "en", { numeric: true }));
+
+  for (const device of list) logFlows(device.ip, device.flows, now);
+  for (const ip of state.flowLog.keys()) {
+    if (!devices.has(ip)) logFlows(ip, [], now);
+  }
 
   const totals = {
     rateUp: list.reduce((sum, device) => sum + device.rateUp, 0),
@@ -215,8 +300,16 @@ export async function getSnapshot(): Promise<SnapshotResponse> {
 export function getDeviceFromSnapshot(snapshot: Snapshot, ip: string): { device: DeviceView; history: HistoryPoint[] } {
   const found = snapshot.devices.find((device) => device.ip === ip);
   const lease = state.leases.find((entry) => entry.address === ip);
+  const device = found ?? emptyDevice(ip, lease, state.dns.lookup);
+  const logged = [...(state.flowLog.get(ip)?.values() ?? [])].sort((a, b) => a.firstSeen - b.firstSeen || a.id.localeCompare(b.id, "en", { numeric: true }));
+  const flows = logged.length ? logged : device.flows;
   return {
-    device: found ?? emptyDevice(ip, lease, state.dns.lookup),
+    device: {
+      ...device,
+      flows,
+      bytesUp: flows.reduce((sum, flow) => sum + flow.bytesUp, 0),
+      bytesDown: flows.reduce((sum, flow) => sum + flow.bytesDown, 0),
+    },
     history: state.deviceHistory.get(ip) ?? [],
   };
 }

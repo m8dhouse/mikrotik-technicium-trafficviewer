@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useMemo, useState } from "react";
-import { Chart, Stat, Status } from "@/components/chart";
+import { Chart, LinkBadge, Stat, Status } from "@/components/chart";
 import { flag, formatBytes, formatRate } from "@/components/format";
 import { usePolling, useStoredState } from "@/components/use-polling";
 import type { DeviceView, Snapshot } from "@/lib/types";
@@ -52,18 +52,19 @@ function DeviceRow({ device }: { device: DeviceView }) {
       >
         <span className="min-w-0 flex-1">
           <span className="block truncate font-medium">{device.name}</span>
-          <span className="block font-mono text-xs text-zinc-500">
+          <span className="flex flex-wrap items-center gap-2 font-mono text-xs text-zinc-500">
             {device.ip}
             {device.mac ? ` · ${device.mac}` : ""}
+            <LinkBadge link={device.link} />
           </span>
         </span>
         <span className="hidden w-32 truncate text-right text-sm md:block" title="Countries by traffic">
           {topCountries(device)}
         </span>
         <span className="hidden w-28 text-right text-sm text-zinc-500 sm:block">{device.flows.length} connections</span>
-        <span className="hidden w-24 text-right font-mono text-xs text-zinc-500 lg:block">{formatBytes(device.bytesDown + device.bytesUp)}</span>
-        <span className="w-28 text-right font-mono text-sm text-sky-600 dark:text-sky-400">↓ {formatRate(device.rateDown)}</span>
-        <span className="w-28 text-right font-mono text-sm text-amber-600 dark:text-amber-400">↑ {formatRate(device.rateUp)}</span>
+        <span className="hidden w-24 shrink-0 text-right font-mono text-xs text-zinc-500 lg:block">{formatBytes(device.bytesDown + device.bytesUp)}</span>
+        <span className="w-32 shrink-0 text-right font-mono text-sm whitespace-nowrap text-sky-600 dark:text-sky-400">↓ {formatRate(device.rateDown)}</span>
+        <span className="w-32 shrink-0 text-right font-mono text-sm whitespace-nowrap text-amber-600 dark:text-amber-400">↑ {formatRate(device.rateUp)}</span>
         <span className="text-zinc-400">›</span>
       </Link>
     </li>
@@ -81,7 +82,7 @@ export default function Dashboard() {
     const needle = filter.trim().toLowerCase();
     const matches = needle
       ? snapshot.devices.filter((device) =>
-          [device.name, device.ip, device.mac, ...device.flows.flatMap((flow) => [flow.domain, flow.dstAddress, flow.label, flow.org, flow.country])]
+          [device.name, device.ip, device.mac, device.link.port, device.link.kind, device.link.via, ...device.flows.flatMap((flow) => [flow.domain, flow.dstAddress, flow.label, flow.org, flow.country])]
             .join(" ")
             .toLowerCase()
             .includes(needle),
@@ -91,7 +92,7 @@ export default function Dashboard() {
   }, [snapshot, filter, sort]);
 
   return (
-    <main className="mx-auto w-full max-w-6xl space-y-6 px-4 py-8">
+    <main className="mx-auto w-full max-w-[1600px] space-y-6 px-4 py-8">
       <header className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold">Outbound traffic</h1>

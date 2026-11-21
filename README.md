@@ -1,4 +1,4 @@
-**Last Updated:** 2026-11-07 | **Log:** Phase 2: device page, geo/hosting, capture and blocking
+**Last Updated:** 2026-11-07 | **Log:** Phase 2e: link type, device names, start script; Google Cloud ranges for locations
 
 # Outbound traffic dashboard
 
@@ -17,9 +17,9 @@ A local page showing which LAN devices talk to the internet, over which protocol
    /user/add name=<router-api-user> group=api-dashboard password=... address=<lan-subnet>
    /ip service set www address=<lan-subnet>
    ```
-   `write` is only needed for packet capture and blocking. Captures sniff the `bridge` interface.
+   `write` is only needed for packet capture, blocking and renaming. Captures sniff the `bridge` interface.
 3. In Technitium, install **Query Logs (Sqlite)** from the App Store.
-4. `npm install`, then `npm run geo:update` (re-run monthly), then `npm run dev` and open <http://127.0.0.1:3000>.
+4. Run `./start.sh`. It installs dependencies, downloads the IP databases when missing or older than 35 days, builds, starts on <http://127.0.0.1:3210> and opens the browser. Use `./start.sh --dev` for live reload, `PORT=…` for another port.
 
 The server listens on `127.0.0.1` only, because the page has no login. Endpoints that change the router reject cross-site requests.
 
@@ -51,6 +51,7 @@ IP geolocation by [DB-IP.com](https://db-ip.com) (CC BY 4.0).
 - **Tasks:**
   - [x] DB-IP Lite databases in `data/geo/` with `npm run geo:update`
   - [x] Location and provider on every connection; IP panel with reverse DNS and outside links
+  - [x] Google Cloud addresses use the region from Google's published ranges ([cloud.json](https://www.gstatic.com/ipranges/cloud.json)), downloaded by `npm run geo:update`; the IP panel shows which source gave the location
 - **Validation:** `1.1.1.1` shows Cloudflare, AS13335, reverse DNS `one.one.one.one`.
 
 ### Phase 2c: packet capture (built, waiting for router `write` right)
@@ -72,6 +73,15 @@ IP geolocation by [DB-IP.com](https://db-ip.com) (CC BY 4.0).
   - [x] Blocked page and device tab: pause, resume, edit comment, remove
   - [ ] Test against the router
 - **Validation:** Blocking a test destination stops it within seconds; removing the rule restores access.
+
+### Phase 2e: link type and device names (done)
+
+- **Goal:** See whether a device is wired, on Wi-Fi or behind a switch, and give devices a name that is kept on the router.
+- **Tasks:**
+  - [x] Link badge from the bridge port, neighbour discovery and private (randomised) MAC addresses
+  - [x] Connections stay listed after they close, grouped per protocol, destination and port, with a green dot for live traffic
+  - [x] Rename on the device page; saved as the DHCP lease comment (a dynamic lease is made static), or in the `brol-names` address list when there is no lease
+- **Validation:** A renamed device shows the new name in the list and in Winbox. The router cannot see Wi-Fi network names on external access points, so the badge shows the port and access point only.
 
 ### Phase 3: history (not started)
 

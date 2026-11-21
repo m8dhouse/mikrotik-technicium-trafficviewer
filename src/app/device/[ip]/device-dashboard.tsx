@@ -1,32 +1,180 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 import { BlocksTable } from "@/components/blocks-table";
-import { Chart, Stat, Status } from "@/components/chart";
+import { Chart, LinkBadge, Stat, Status } from "@/components/chart";
 import { flag, formatBytes, formatRate, formatTime } from "@/components/format";
 import { usePolling, useStoredState } from "@/components/use-polling";
 import type { DeviceDetail, FlowView } from "@/lib/types";
 import { BlockDialog, type BlockTarget } from "./block-dialog";
 import { CapturePanel, type CaptureTarget } from "./capture-panel";
 import { LookupPanel } from "./lookup-panel";
+import { DeviceTitle } from "./rename";
 
 const POLL_MS = 3000;
 
 type Tab = "connections" | "dns" | "capture" | "blocks";
-type SortKey = "destination" | "protocol" | "location" | "provider" | "down" | "up" | "now";
+type SortKey = "seen" | "destination" | "protocol" | "location" | "provider" | "down" | "up" | "now";
 
-const COLUMNS: { key: SortKey; label: string; align?: "right" }[] = [
-  { key: "protocol", label: "Protocol" },
-  { key: "destination", label: "Destination" },
-  { key: "location", label: "Location" },
-  { key: "provider", label: "Hosted by" },
-  { key: "down", label: "Down", align: "right" },
-  { key: "up", label: "Up", align: "right" },
-  { key: "now", label: "Now", align: "right" },
+const ACTIVE_MS = 6000;
+
+const COLUMNS: { key: SortKey; label: string; width: string; align?: "right" }[] = [
+  { key: "seen", label: "First seen", width: "w-36" },
+  { key: "protocol", label: "Protocol", width: "w-36" },
+  { key: "destination", label: "Destination", width: "" },
+  { key: "location", label: "Location", width: "w-44" },
+  { key: "provider", label: "Hosted by", width: "w-56" },
+  { key: "down", label: "Down", width: "w-24", align: "right" },
+  { key: "up", label: "Up", width: "w-24", align: "right" },
+  { key: "now", label: "Now", width: "w-56", align: "right" },
 ];
 
+function ActivityDot({ flow, now }: { flow: FlowView; now: number }) {
+  if (!flow.open) {
+    return <span title={`Closed · last seen ${formatTime(flow.lastSeen)}`} className="inline-block h-2.5 w-2.5 rounded-full border border-zinc-400" />;
+  }
+  if (flow.lastActive && now - flow.lastActive < ACTIVE_MS) {
+    return (
+      <span title="Traffic right now" className="relative inline-flex h-2.5 w-2.5">
+        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+        <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-emerald-500" />
+      </span>
+    );
+  }
+  return <span title="Open, idle" className="inline-block h-2.5 w-2.5 rounded-full bg-zinc-300 dark:bg-zinc-600" />;
+}
+
+type FlowGroup = { key: string; summary: FlowView; members: FlowView[] };
+
+function groupFlows(flows: FlowView[], enabled: boolean): FlowGroup[] {
+  const groups = new Map<string, FlowView[]>();
+  for (const flow of flows) {
+    const key = enabled ? `${flow.protocol}|${flow.dstAddress}|${flow.dstPort}` : `${flow.id}|${flow.dstAddress}|${flow.dstPort}`;
+    groups.set(key, [...(groups.get(key) ?? []), flow]);
+  }
+
+  return [...groups.entries()].map(([key, members]) => {
+    members.sort((a, b) => a.firstSeen - b.firstSeen || a.id.localeCompare(b.id, "en", { numeric: true }));
+    if (members.length === 1) return { key, summary: members[0], members };
+
+    const open = members.filter((flow) => flow.open);
+    const latest = members[members.length - 1];
+    const summary: FlowView = {
+      ...latest,
+      id: key,
+      domain: members.find((flow) => flow.domain)?.domain ?? "",
+      bytesUp: members.reduce((sum, flow) => sum + flow.bytesUp, 0),
+      bytesDown: members.reduce((sum, flow) => sum + flow.bytesDown, 0),
+      rateUp: members.reduce((sum, flow) => sum + flow.rateUp, 0),
+      rateDown: members.reduce((sum, flow) => sum + flow.rateDown, 0),
+      open: open.length > 0,
+      firstSeen: members[0].firstSeen,
+      lastSeen: Math.max(...members.map((flow) => flow.lastSeen)),
+      lastActive: Math.max(...members.map((flow) => flow.lastActive)),
+      state: "",
+    };
+    return { key, summary, members };
+  });
+}
+
+type RowActions = {
+  now: number;
+  onLookup: (ip: string) => void;
+  onCapture: (flow: FlowView) => void;
+  onBlock: (flow: FlowView) => void;
+};
+
+function FlowRow({
+  flow,
+  count = 1,
+  openMembers = 0,
+  expanded = false,
+  nested = false,
+  onToggle,
+  now,
+  onLookup,
+  onCapture,
+  onBlock,
+}: RowActions & { flow: FlowView; count?: number; openMembers?: number; expanded?: boolean; nested?: boolean; onToggle?: () => void }) {
+  const status = count > 1 ? (openMembers ? `${openMembers} of ${count} open` : `${count} connections, all closed`) : flow.state;
+
+  return (
+    <tr
+      className={`border-t border-zinc-100 align-top dark:border-zinc-800/60 ${flow.open ? "" : "text-zinc-400 dark:text-zinc-500"} ${nested ? "bg-zinc-50 text-xs dark:bg-zinc-950/40" : ""}`}
+    >
+      <td className={`py-3 ${nested ? "pr-3 pl-6" : "px-3"}`}>
+        <ActivityDot flow={flow} now={now} />
+      </td>
+      <td className="px-3 py-2 font-mono text-xs whitespace-nowrap text-zinc-500">
+        {formatTime(flow.firstSeen)}
+        {!flow.open && <span className="block">closed {formatTime(flow.lastSeen)}</span>}
+      </td>
+      <td className="px-3 py-2 whitespace-nowrap">
+        <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-xs dark:bg-zinc-800">{flow.label}</span>
+        {count > 1 && (
+          <button
+            onClick={onToggle}
+            className="ml-1.5 rounded bg-sky-100 px-1.5 py-0.5 text-xs text-sky-700 hover:bg-sky-200 dark:bg-sky-950 dark:text-sky-300"
+            title={expanded ? "Hide individual connections" : "Show individual connections"}
+          >
+            {expanded ? "▾" : "▸"} ×{count}
+          </button>
+        )}
+      </td>
+      <td className="truncate px-3 py-2">
+        {nested ? (
+          <span className="font-mono text-xs text-zinc-500">source port {flow.srcPort}</span>
+        ) : (
+          <>
+            <span className="block truncate" title={flow.domain}>
+              {flow.domain || <span className="text-zinc-400">unknown domain</span>}
+            </span>
+            <button onClick={() => onLookup(flow.dstAddress)} className="font-mono text-xs text-sky-600 hover:underline dark:text-sky-400">
+              {flow.dstAddress}:{flow.dstPort}
+            </button>
+          </>
+        )}
+        {status && <span className="font-mono text-xs text-zinc-500"> · {status}</span>}
+      </td>
+      <td className="truncate px-3 py-2">
+        {nested ? null : flow.country ? (
+          <span title={flow.country}>
+            {flag(flow.countryCode)} {flow.city || flow.country}
+          </span>
+        ) : (
+          <span className="text-zinc-400">–</span>
+        )}
+      </td>
+      <td className="truncate px-3 py-2" title={flow.org}>
+        {nested ? null : flow.org || <span className="text-zinc-400">–</span>}
+      </td>
+      <td className="px-3 py-2 text-right font-mono whitespace-nowrap">{formatBytes(flow.bytesDown)}</td>
+      <td className="px-3 py-2 text-right font-mono whitespace-nowrap">{formatBytes(flow.bytesUp)}</td>
+      <td className="px-3 py-2 text-right font-mono text-xs whitespace-nowrap text-zinc-500">
+        {!flow.open ? "closed" : flow.rateDown + flow.rateUp > 0 ? `↓ ${formatRate(flow.rateDown)} ↑ ${formatRate(flow.rateUp)}` : "idle"}
+      </td>
+      <td className="px-3 py-2 text-right whitespace-nowrap">
+        {!nested && (
+          <>
+            <button onClick={() => onLookup(flow.dstAddress)} className="px-1 text-xs text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100" title="Look up this IP">
+              Info
+            </button>
+            <button onClick={() => onCapture(flow)} className="px-1 text-xs text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100" title="Capture packets for this destination">
+              Capture
+            </button>
+            <button onClick={() => onBlock(flow)} className="px-1 text-xs text-red-600 hover:text-red-800 dark:text-red-400">
+              Block
+            </button>
+          </>
+        )}
+      </td>
+    </tr>
+  );
+}
+
 function sortValue(flow: FlowView, key: SortKey): string | number {
+  if (key === "seen") return flow.firstSeen;
   if (key === "destination") return `${flow.domain || "~"} ${flow.dstAddress}`;
   if (key === "protocol") return flow.label;
   if (key === "location") return `${flow.country} ${flow.city}`;
@@ -74,8 +222,11 @@ function group(flows: FlowView[], key: (flow: FlowView) => string): { label: str
 export default function DeviceDashboard({ ip }: { ip: string }) {
   const [paused, setPaused] = useState(false);
   const [tab, setTab] = useState<Tab>("connections");
-  const [sort, setSort] = useStoredState<SortKey>("flow-sort", "destination");
-  const [descending, setDescending] = useStoredState<"yes" | "no">("flow-sort-desc", "no");
+  const [sort, setSort] = useStoredState<SortKey>("flow-sort-v2", "seen");
+  const [descending, setDescending] = useStoredState<"yes" | "no">("flow-sort-desc-v2", "no");
+  const [showClosed, setShowClosed] = useStoredState<"yes" | "no">("flow-show-closed", "yes");
+  const [grouped, setGrouped] = useStoredState<"yes" | "no">("flow-grouped", "yes");
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState("");
   const [dnsFilter, setDnsFilter] = useState("");
   const [lookup, setLookup] = useState<string | null>(null);
@@ -86,22 +237,35 @@ export default function DeviceDashboard({ ip }: { ip: string }) {
   const { data, error } = usePolling<DeviceDetail>(`/api/device/${ip}`, POLL_MS, paused);
   const device = data?.device;
 
-  const flows = useMemo(() => {
+  const rows = useMemo(() => {
     if (!device) return [];
     const needle = filter.trim().toLowerCase();
+    const visible = showClosed === "yes" ? device.flows : device.flows.filter((flow) => flow.open);
     const list = needle
-      ? device.flows.filter((flow) =>
+      ? visible.filter((flow) =>
           [flow.domain, flow.dstAddress, String(flow.dstPort), flow.label, flow.country, flow.city, flow.org].join(" ").toLowerCase().includes(needle),
         )
-      : device.flows;
+      : visible;
     const direction = descending === "yes" ? -1 : 1;
-    return [...list].sort((a, b) => {
-      const left = sortValue(a, sort);
-      const right = sortValue(b, sort);
+    return groupFlows(list, grouped === "yes").sort((a, b) => {
+      const left = sortValue(a.summary, sort);
+      const right = sortValue(b.summary, sort);
       const result = typeof left === "number" && typeof right === "number" ? left - right : String(left).localeCompare(String(right), "en", { numeric: true });
-      return result * direction || a.id.localeCompare(b.id, "en", { numeric: true });
+      return result * direction || a.key.localeCompare(b.key, "en", { numeric: true });
     });
-  }, [device, filter, sort, descending]);
+  }, [device, filter, sort, descending, showClosed, grouped]);
+
+  const toggleRow = (key: string) =>
+    setExpanded((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+
+  const openCount = device?.flows.filter((flow) => flow.open).length ?? 0;
+  const closedCount = (device?.flows.length ?? 0) - openCount;
+  const now = data?.takenAt ?? 0;
 
   const queries = useMemo(() => {
     const list = data?.dns.queries ?? [];
@@ -124,26 +288,31 @@ export default function DeviceDashboard({ ip }: { ip: string }) {
   };
 
   const tabs: { key: Tab; label: string }[] = [
-    { key: "connections", label: `Connections${device ? ` (${device.flows.length})` : ""}` },
+    { key: "connections", label: `Connections${device ? ` (${openCount} open · ${closedCount} closed)` : ""}` },
     { key: "dns", label: `DNS lookups${data ? ` (${data.dns.queries.length})` : ""}` },
     { key: "capture", label: "Capture" },
     { key: "blocks", label: "Blocks" },
   ];
 
   return (
-    <main className="mx-auto w-full max-w-6xl space-y-6 px-4 py-8">
+    <main className="mx-auto w-full max-w-[1600px] space-y-6 px-4 py-8">
       <Link href="/" className="text-sm text-sky-600 hover:underline dark:text-sky-400">
         ← All devices
       </Link>
 
       <header className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold">{device?.name ?? ip}</h1>
+          {device ? <DeviceTitle key={device.name} ip={ip} name={device.name} onSaved={setNotice} /> : <h1 className="text-2xl font-semibold">{ip}</h1>}
           <p className="font-mono text-sm text-zinc-500">
             {ip}
             {device?.mac ? ` · ${device.mac}` : ""}
             {device?.hostName && device.hostName !== device.name ? ` · ${device.hostName}` : ""}
           </p>
+          {device && (
+            <p className="mt-2">
+              <LinkBadge link={device.link} detailed />
+            </p>
+          )}
         </div>
         <div className="flex items-center gap-3 text-xs">
           {data && (
@@ -172,8 +341,8 @@ export default function DeviceDashboard({ ip }: { ip: string }) {
           <section className="grid grid-cols-2 gap-3 sm:grid-cols-4">
             <Stat label="Download now" value={formatRate(device.rateDown)} className="text-sky-600 dark:text-sky-400" />
             <Stat label="Upload now" value={formatRate(device.rateUp)} className="text-amber-600 dark:text-amber-400" />
-            <Stat label="Downloaded (open connections)" value={formatBytes(device.bytesDown)} />
-            <Stat label="Uploaded (open connections)" value={formatBytes(device.bytesUp)} />
+            <Stat label="Downloaded (all seen connections)" value={formatBytes(device.bytesDown)} />
+            <Stat label="Uploaded (all seen connections)" value={formatBytes(device.bytesUp)} />
           </section>
 
           <section className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
@@ -213,84 +382,71 @@ export default function DeviceDashboard({ ip }: { ip: string }) {
                   placeholder="Filter by domain, IP, port, protocol, country or provider…"
                   className="min-w-64 flex-1 rounded-lg border border-zinc-300 bg-white px-4 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-900"
                 />
+                <label className="flex items-center gap-2 text-sm text-zinc-500">
+                  <input type="checkbox" checked={grouped === "yes"} onChange={(event) => setGrouped(event.target.checked ? "yes" : "no")} />
+                  Group same destination
+                </label>
+                <label className="flex items-center gap-2 text-sm text-zinc-500">
+                  <input type="checkbox" checked={showClosed === "yes"} onChange={(event) => setShowClosed(event.target.checked ? "yes" : "no")} />
+                  Show closed
+                </label>
                 <button onClick={() => capture()} className="rounded-lg border border-zinc-300 px-3 py-2 text-sm dark:border-zinc-700">
                   Capture all traffic of this device
                 </button>
               </div>
               <div className="overflow-x-auto rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
-                <table className="w-full text-sm">
+                <table className="w-full min-w-[1200px] table-fixed text-sm tabular-nums">
                   <thead className="text-left text-xs text-zinc-500 uppercase">
                     <tr>
+                      <th className="w-10 px-3 py-2" />
                       {COLUMNS.map((column) => (
-                        <th key={column.key} className={`px-3 py-2 font-medium ${column.align === "right" ? "text-right" : ""}`}>
+                        <th key={column.key} className={`${column.width} px-3 py-2 font-medium whitespace-nowrap ${column.align === "right" ? "text-right" : ""}`}>
                           <button onClick={() => sortBy(column.key)} className="uppercase hover:text-zinc-900 dark:hover:text-zinc-100">
                             {column.label}
                             {sort === column.key ? (descending === "yes" ? " ↓" : " ↑") : ""}
                           </button>
                         </th>
                       ))}
-                      <th className="px-3 py-2" />
+                      <th className="w-44 px-3 py-2" />
                     </tr>
                   </thead>
                   <tbody>
-                    {flows.map((flow) => (
-                      <tr key={flow.id} className="border-t border-zinc-100 align-top dark:border-zinc-800/60">
-                        <td className="px-3 py-2 whitespace-nowrap">
-                          <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-xs dark:bg-zinc-800">{flow.label}</span>
-                        </td>
-                        <td className="px-3 py-2">
-                          <span className="block">{flow.domain || <span className="text-zinc-400">unknown domain</span>}</span>
-                          <button onClick={() => setLookup(flow.dstAddress)} className="font-mono text-xs text-sky-600 hover:underline dark:text-sky-400">
-                            {flow.dstAddress}:{flow.dstPort}
-                          </button>
-                          {flow.state && <span className="font-mono text-xs text-zinc-500"> · {flow.state}</span>}
-                        </td>
-                        <td className="px-3 py-2 whitespace-nowrap">
-                          {flow.country ? (
-                            <span title={flow.country}>
-                              {flag(flow.countryCode)} {flow.city || flow.country}
-                            </span>
-                          ) : (
-                            <span className="text-zinc-400">–</span>
-                          )}
-                        </td>
-                        <td className="max-w-48 truncate px-3 py-2" title={flow.org}>
-                          {flow.org || <span className="text-zinc-400">–</span>}
-                        </td>
-                        <td className="px-3 py-2 text-right font-mono whitespace-nowrap">{formatBytes(flow.bytesDown)}</td>
-                        <td className="px-3 py-2 text-right font-mono whitespace-nowrap">{formatBytes(flow.bytesUp)}</td>
-                        <td className="px-3 py-2 text-right font-mono text-xs whitespace-nowrap text-zinc-500">
-                          {flow.rateDown + flow.rateUp > 0 ? `↓ ${formatRate(flow.rateDown)} ↑ ${formatRate(flow.rateUp)}` : "idle"}
-                        </td>
-                        <td className="px-3 py-2 text-right whitespace-nowrap">
-                          <button onClick={() => setLookup(flow.dstAddress)} className="px-1 text-xs text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100" title="Look up this IP">
-                            Info
-                          </button>
-                          <button onClick={() => capture(flow)} className="px-1 text-xs text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100" title="Capture packets for this destination">
-                            Capture
-                          </button>
-                          <button
-                            onClick={() =>
-                              setBlockTarget({
-                                device: ip,
-                                deviceName: device.name,
-                                destination: flow.dstAddress,
-                                protocol: flow.protocol === "tcp" || flow.protocol === "udp" ? flow.protocol : "",
-                                port: flow.dstPort,
-                                hint: flow.domain || flow.org,
-                              })
-                            }
-                            className="px-1 text-xs text-red-600 hover:text-red-800 dark:text-red-400"
-                          >
-                            Block
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                    {flows.length === 0 && (
+                    {rows.map((row) => {
+                      const isOpen = expanded.has(row.key);
+                      const actions = {
+                        now,
+                        onLookup: setLookup,
+                        onCapture: capture,
+                        onBlock: (flow: FlowView) =>
+                          setBlockTarget({
+                            device: ip,
+                            deviceName: device.name,
+                            destination: flow.dstAddress,
+                            protocol: flow.protocol === "tcp" || flow.protocol === "udp" ? flow.protocol : "",
+                            port: flow.dstPort,
+                            hint: flow.domain || flow.org,
+                          }),
+                      };
+                      return (
+                        <Fragment key={row.key}>
+                          <FlowRow
+                            flow={row.summary}
+                            count={row.members.length}
+                            openMembers={row.members.filter((flow) => flow.open).length}
+                            expanded={isOpen}
+                            onToggle={row.members.length > 1 ? () => toggleRow(row.key) : undefined}
+                            {...actions}
+                          />
+                          {isOpen &&
+                            row.members.length > 1 &&
+                            row.members.map((flow) => <FlowRow key={`${flow.id}|${flow.dstAddress}|${flow.dstPort}`} flow={flow} nested {...actions} />)}
+                        </Fragment>
+                      );
+                    })}
+                    {rows.length === 0 && (
                       <tr>
-                        <td colSpan={8} className="px-3 py-8 text-center text-zinc-500">
-                          No open outbound connections right now.
+                        <td colSpan={10} className="px-3 py-8 text-center text-zinc-500">
+                          No outbound connections seen yet.
                         </td>
                       </tr>
                     )}

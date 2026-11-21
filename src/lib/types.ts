@@ -7,6 +7,8 @@ export type GeoInfo = {
   longitude: number | null;
   asn: number | null;
   org: string;
+  source: string;
+  cloudRegion: string;
 };
 
 export type FlowView = {
@@ -26,6 +28,18 @@ export type FlowView = {
   country: string;
   city: string;
   org: string;
+  open: boolean;
+  firstSeen: number;
+  lastSeen: number;
+  lastActive: number;
+};
+
+export type LinkInfo = {
+  kind: "wifi" | "wired" | "switch" | "unknown";
+  port: string;
+  via: string;
+  privateMac: boolean;
+  reason: string;
 };
 
 export type DeviceView = {
@@ -33,6 +47,7 @@ export type DeviceView = {
   name: string;
   mac: string;
   hostName: string;
+  link: LinkInfo;
   rateUp: number;
   rateDown: number;
   bytesUp: number;
